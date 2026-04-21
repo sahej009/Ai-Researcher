@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+crewai
+langchain-community
+langchain-groq
+pypdf
+sqlalchemy
+python-multipart
+duckduckgo-search
+python-dotenv
