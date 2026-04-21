@@ -39,3 +39,44 @@ Follow these steps to run the application on your local machine.
 ```bash
 git clone [https://github.com/sahej009/Ai-researcher.git](https://github.com/sahej009/Ai-researcher.git)
 cd Ai-researcher
+
+### 3.Backend Setup (FastAPI & AI)
+Open a terminal in the project root:
+
+Bash
+# Create a virtual environment (optional but recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows use: venv\Scripts\activate
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Create a .env file and add your Groq API key
+echo "GROQ_API_KEY=gsk_your_api_key_here" > .env
+
+# Run the FastAPI server
+uvicorn main:app --reload
+The backend will now be running on http://127.0.0.1:8000
+
+4. Frontend Setup (React)
+Open a second terminal window in the project root:
+
+Bash
+# Install Node dependencies
+npm install
+
+# Start the Vite development server
+npm run dev
+The frontend will now be running on http://localhost:5173
+
+☁️ Deployment
+This project is configured for split deployment:
+
+Backend: Deploy main.py and requirements.txt to Render as a Python Web Service. Set the GROQ_API_KEY in Render's environment variables.
+
+Frontend: Update the API URLs in src/App.jsx to point to your new Render URL, then deploy the repository to Vercel.
+
+Note: Free-tier cloud providers use ephemeral file systems. SQLite history and temporary PDF uploads will reset if the server sleeps.
+
+📝 License
+This project is open-source and available under the MIT License.
