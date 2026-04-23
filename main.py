@@ -49,8 +49,8 @@ os.makedirs("temp_uploads", exist_ok=True)
 
 # This parser natively understands Llama 3's XML function tags!
 groq_llm = LLM(
-    model="groq/openai/gpt-oss-20b",
-    temperature=0.3
+    model="groq/llama-3.1-8b-instant",
+    temperature=0.1
 )
 
 @tool("search_internet")
