@@ -100,6 +100,8 @@ def conduct_research(topic: str, file_path: str = None):
                 goal=f'Analyze data and uncover insights about: {topic}',
                 backstory='You read provided documents and search the web to extract verified facts.',
                 allow_delegation=False,
+                verbose=False,  # Set this to False to save tokens
+                memory=False,   # Set this to False to save tokens
                 tools=[search_internet], 
                 llm=groq_llm,
                 step_callback=agent_step_callback
@@ -110,6 +112,8 @@ def conduct_research(topic: str, file_path: str = None):
                 goal='Craft compelling summaries based on raw research',
                 backstory='You are a renowned tech writer.',
                 allow_delegation=False,
+                 verbose=False,  # Set this to False to save tokens
+                memory=False,   # Set this to False to save tokens
                 llm=groq_llm,
                 step_callback=agent_step_callback
             )
@@ -119,6 +123,8 @@ def conduct_research(topic: str, file_path: str = None):
                 goal='Ensure the final post is highly engaging and professional.',
                 backstory='You are a meticulous tech editor who polishes content.',
                 allow_delegation=False,
+                 verbose=False,  # Set this to False to save tokens
+                memory=False,   # Set this to False to save tokens
                  llm=groq_llm,
                 
                 step_callback=agent_step_callback
