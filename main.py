@@ -152,8 +152,8 @@ def conduct_research(topic: str, file_path: str = None):
                 max_inter=3 
             )
             
-            write_task = Task(description='Write a short LinkedIn post.', expected_output='2-paragraph post.', agent=writer)
-            edit_task = Task(description='Review and polish the drafted post.', expected_output='Final post.', agent=editor)
+            write_task = Task(description='Write a comprehensive research report based on the findings. Use Markdown formatting including a main title (H1), section headers (H2), and bullet points for key data.', expected_output='A highly structured Markdown report.', agent=writer)
+            edit_task = Task(description='Review and polish the drafted report. Ensure the Markdown formatting is perfect, professional, and highly readable.', expected_output='The final formatted Markdown report..', agent=editor)
 
             ai_crew = Crew(
                 agents=[researcher, writer, editor],
