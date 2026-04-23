@@ -49,7 +49,7 @@ os.makedirs("temp_uploads", exist_ok=True)
 
 # This parser natively understands Llama 3's XML function tags!
 groq_llm = LLM(
-    model="llama-3.3-70b-versatile",
+    model="groq/llama-3.3-70b-versatile",
     temperature=0.1
 )
 
