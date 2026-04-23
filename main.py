@@ -53,13 +53,19 @@ groq_llm = LLM(
     temperature=0.1
 )
 
+
 @tool("search_internet")
 def search_internet(query: str) -> str:
     """
     Search the internet for the latest information on a given topic.
-    CRITICAL INSTRUCTION: Your search query must be extremely short and concise (under 5 words). Do not use synonyms.
     """
-    return DuckDuckGoSearchRun().run(query)
+    try:
+        # We import it inside the function to avoid startup crashes
+        from langchain_community.tools import DuckDuckGoSearchRun
+        search = DuckDuckGoSearchRun()
+        return search.run(query)
+    except Exception as e:
+        return f"Search failed. Please rely on your internal knowledge or document context. Error: {str(e)}"
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     file_path = f"temp_uploads/{file.filename}"
