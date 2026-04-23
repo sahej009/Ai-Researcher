@@ -10,8 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool
-from langchain_community.tools import DuckDuckGoSearchRun
 from pypdf import PdfReader
+
 # --- NEW IMPORTS FOR DATABASE ---
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -47,17 +47,20 @@ app.add_middleware(
 groq_key = os.environ.get("GROQ_API_KEY")
 os.makedirs("temp_uploads", exist_ok=True)
 
-# This parser natively understands Llama 3's XML function tags!
+# The stable 70B model with strict tool adherence
 groq_llm = LLM(
     model="groq/llama-3.3-70b-versatile",
-    temperature=0.1
+    temperature=0,
+    max_tokens=4096
 )
 
-
+# GUARDRAIL 1: Explicit instructions on HOW to use the tool
 @tool("search_internet")
 def search_internet(query: str) -> str:
     """
     Search the internet for the latest information on a given topic.
+    The input MUST be a single string representing the search query.
+    Do not use any special characters or XML tags.
     """
     try:
         # We import it inside the function to avoid startup crashes
@@ -66,6 +69,7 @@ def search_internet(query: str) -> str:
         return search.run(query)
     except Exception as e:
         return f"Search failed. Please rely on your internal knowledge or document context. Error: {str(e)}"
+
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     file_path = f"temp_uploads/{file.filename}"
@@ -73,7 +77,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
     return {"status": "success", "file_path": file_path}
 
-# --- NEW ENDPOINT: FETCH HISTORY ---
 @app.get("/api/history")
 def get_history():
     db = SessionLocal()
@@ -106,8 +109,8 @@ def conduct_research(topic: str, file_path: str = None):
                 goal=f'Analyze data and uncover insights about: {topic}',
                 backstory='You read provided documents and search the web to extract verified facts.',
                 allow_delegation=False,
-                verbose=False,  # Set this to False to save tokens
-                memory=False,   # Set this to False to save tokens
+                verbose=False,  
+                memory=False,   
                 tools=[search_internet], 
                 llm=groq_llm,
                 step_callback=agent_step_callback
@@ -118,8 +121,8 @@ def conduct_research(topic: str, file_path: str = None):
                 goal='Craft compelling summaries based on raw research',
                 backstory='You are a renowned tech writer.',
                 allow_delegation=False,
-                 verbose=False,  # Set this to False to save tokens
-                memory=False,   # Set this to False to save tokens
+                verbose=False,  
+                memory=False,   
                 llm=groq_llm,
                 step_callback=agent_step_callback
             )
@@ -129,19 +132,26 @@ def conduct_research(topic: str, file_path: str = None):
                 goal='Ensure the final post is highly engaging and professional.',
                 backstory='You are a meticulous tech editor who polishes content.',
                 allow_delegation=False,
-                 verbose=False,  # Set this to False to save tokens
-                memory=False,   # Set this to False to save tokens
-                 llm=groq_llm,
-                
+                verbose=False,  
+                memory=False,   
+                llm=groq_llm,
                 step_callback=agent_step_callback
             )
 
+            # GUARDRAIL 2: Strict tool rules injected into the prompt
             if extracted_text:
-                task_desc = f"Analyze the following document text and search the web to research: {topic}.\n\n--- DOC START ---\n{extracted_text}\n--- DOC END ---"
+                task_desc = f"Analyze the following document text and search the web to research: {topic}. ONLY use the 'search_internet' tool if needed. Do NOT use tags like <function>.\n\n--- DOC START ---\n{extracted_text}\n--- DOC END ---"
             else:
-                task_desc = f"Search the web to research: {topic}. Extract key facts."
+                task_desc = f"Search the web to research: {topic}. Extract key facts. ONLY use the 'search_internet' tool. Do NOT use tags like <function>."
 
-            research_task = Task(description=task_desc, expected_output='A list of findings.', agent=researcher)
+            # GUARDRAIL 3: max_inter limits the agent from looping into errors
+            research_task = Task(
+                description=task_desc, 
+                expected_output='A list of findings.', 
+                agent=researcher,
+                max_inter=3 
+            )
+            
             write_task = Task(description='Write a short LinkedIn post.', expected_output='2-paragraph post.', agent=writer)
             edit_task = Task(description='Review and polish the drafted post.', expected_output='Final post.', agent=editor)
 
@@ -154,7 +164,6 @@ def conduct_research(topic: str, file_path: str = None):
             result = ai_crew.kickoff()
             final_text = str(result)
             
-            # --- NEW: SAVE TO DATABASE BEFORE FINISHING ---
             db = SessionLocal()
             new_entry = ResearchHistory(topic=topic, result=final_text)
             db.add(new_entry)

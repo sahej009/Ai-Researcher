@@ -1,11 +1,11 @@
 fastapi
 uvicorn
-crewai
+crewai>=0.28.0
 langchain-community
 langchain-groq
 pypdf
 sqlalchemy
 python-multipart
-duckduckgo-search
+duckduckgo-search==6.2.4
 python-dotenv
 litellm
