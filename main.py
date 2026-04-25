@@ -1,6 +1,8 @@
 import os
 import json
 import shutil
+import time
+import re
 from queue import Queue
 from langchain_groq import ChatGroq
 from crewai import LLM
@@ -161,8 +163,34 @@ def conduct_research(topic: str, file_path: str = None):
                 process=Process.sequential
             )
 
-            result = ai_crew.kickoff()
-            final_text = str(result)
+            # --- NEW AUTO-RETRY CODE WITH DYNAMIC WAIT TIME ---
+            max_retries = 2
+            delay_seconds = 20
+            final_text = None
+
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        queue.put(json.dumps({"type": "log", "message": f"Retrying task... (Attempt {attempt}/{max_retries})"}))
+                    
+                    result = ai_crew.kickoff()
+                    final_text = str(result)
+                    break  # If successful, break out of the retry loop
+
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if attempt < max_retries and ("rate limit" in error_str or "tokens" in error_str or "429" in error_str):
+                        match = re.search(r"try again in (\d+\.?\d*)s", error_str)
+                        if match:
+                            exact_wait = float(match.group(1)) + 1.0
+                        else:
+                            exact_wait = 20.0 
+                        delay_seconds = round(exact_wait, 2)
+                        
+                        queue.put(json.dumps({"type": "log", "message": f"API cooldown hit. Dynamically pausing for {delay_seconds} seconds..."}))
+                        time.sleep(delay_seconds)
+                    else:
+                        raise e 
             
             db = SessionLocal()
             new_entry = ResearchHistory(topic=topic, result=final_text)
