@@ -18,7 +18,7 @@ charset-normalizer==3.4.7
 chromadb==1.1.1
 click==8.1.8
 colorama==0.4.6
-crewai==1.14.1
+crewai
 crewai-tools==1.14.1
 cryptography==46.0.7
 dataclasses-json==0.6.7
@@ -86,7 +86,7 @@ langgraph-prebuilt==1.0.9
 langgraph-sdk==0.3.13
 langsmith==0.7.32
 linkify-it-py==2.1.0
-litellm==1.83.8
+litellm
 lxml==6.0.4
 markdown-it-py==4.0.0
 MarkupSafe==3.0.3
