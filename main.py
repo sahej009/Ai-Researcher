@@ -1,3 +1,4 @@
+
 import os
 import json
 import shutil
@@ -12,20 +13,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool
-from pypdf import PdfReader
 
-# --- NEW IMPORTS FOR DATABASE ---
+# --- NEW RAG IMPORTS ---
+from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, Settings
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.readers.file import PyMuPDFReader
+from llama_index.postprocessor.cohere_rerank import CohereRerank
+from llama_index.llms.groq import Groq as LlamaIndexGroq
+import qdrant_client
+
+# --- DATABASE SETUP (SQL for History) ---
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 
-# --- DATABASE SETUP ---
-DATABASE_URL = "sqlite:///./research_history.db" # Creates a local file database
+DATABASE_URL = "sqlite:///./research_history.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Define the SQL Table schema
 class ResearchHistory(Base):
     __tablename__ = "history"
     id = Column(Integer, primary_key=True, index=True)
@@ -33,11 +40,14 @@ class ResearchHistory(Base):
     result = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# Create the table in the database file
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI()
+# --- LLAMAINDEX GLOBAL SETTINGS ---
+# We set this up once so the vector database knows how to read and think
+Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
 
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,6 +82,29 @@ def search_internet(query: str) -> str:
     except Exception as e:
         return f"Search failed. Please rely on your internal knowledge or document context. Error: {str(e)}"
 
+# GUARDRAIL: The Agent's private database tool
+@tool("search_pdf_database")
+def search_pdf_database(query: str) -> str:
+    """
+    Search the uploaded private PDF document for highly specific information.
+    The input MUST be a single string representing the search query.
+    Use this tool when you need facts, numbers, or context from the user's uploaded file.
+    """
+    try:
+        # Re-connect to the database we build during the upload phase
+        client = qdrant_client.QdrantClient(path="./qdrant_db")
+        vector_store = QdrantVectorStore(client=client, collection_name="current_research")
+        index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
+        
+        # Use Cohere to re-rank for pinpoint accuracy
+        cohere_rerank = CohereRerank(api_key=os.environ.get("COHERE_API_KEY"), top_n=3)
+        query_engine = index.as_query_engine(similarity_top_k=10, node_postprocessors=[cohere_rerank])
+        
+        response = query_engine.query(query)
+        return str(response)
+    except Exception as e:
+        return f"Database search failed. Error: {str(e)}"
+
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     file_path = f"temp_uploads/{file.filename}"
@@ -97,23 +130,45 @@ def conduct_research(topic: str, file_path: str = None):
         try:
             queue.put(json.dumps({"type": "log", "message": f"Initializing workflow for: {topic}"}))
             
-            extracted_text = ""
-            if file_path and os.path.exists(file_path):
-                queue.put(json.dumps({"type": "log", "message": f"Extracting text from PDF via Python..."}))
-                reader = PdfReader(file_path)
-                for page in reader.pages:
-                    if page.extract_text():
-                        extracted_text += page.extract_text() + "\n"
-                queue.put(json.dumps({"type": "log", "message": f"Successfully extracted {len(extracted_text)} characters."}))
+            # --- DYNAMIC VECTOR DATABASE BUILDER ---
+            agent_tools = [search_internet] # By default, only web search is available
 
+            if file_path and os.path.exists(file_path):
+                queue.put(json.dumps({"type": "log", "message": "High-Fidelity PDF detected. Building Vector Database..."}))
+                
+                # Delete old database to prevent mixing up old PDFs with new ones
+                if os.path.exists("./qdrant_db"):
+                    shutil.rmtree("./qdrant_db")
+                
+                # Read the PDF cleanly with PyMuPDF
+                pdf_extractor = {".pdf": PyMuPDFReader()}
+                documents = SimpleDirectoryReader(input_files=[file_path], file_extractor=pdf_extractor).load_data()
+                
+                # Build the Vector Database
+                queue.put(json.dumps({"type": "log", "message": "Chunking math & text into Qdrant..."}))
+                client = qdrant_client.QdrantClient(path="./qdrant_db")
+                vector_store = QdrantVectorStore(client=client, collection_name="current_research")
+                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                VectorStoreIndex.from_documents(documents, storage_context=storage_context)
+                
+                queue.put(json.dumps({"type": "log", "message": "Database ready! Equipping Agent with RAG Tool."}))
+                
+                # Give the agent the second tool!
+                agent_tools.append(search_pdf_database)
+                
+                task_desc = f"Research this topic: {topic}. You have access to a local PDF database containing the user's private document AND the live internet. Use BOTH tools to cross-reference private facts with public news. Do NOT use tags like <function>."
+            else:
+                task_desc = f"Search the web to research: {topic}. Extract key facts. ONLY use the 'search_internet' tool. Do NOT use tags like <function>."
+
+            # --- AGENT DEFINITIONS ---
             researcher = Agent(
                 role='Senior Tech Researcher',
                 goal=f'Analyze data and uncover insights about: {topic}',
-                backstory='You read provided documents and search the web to extract verified facts.',
+                backstory='You seamlessly navigate private databases and public web pages to find undeniable facts.',
                 allow_delegation=False,
                 verbose=False,  
                 memory=False,   
-                tools=[search_internet], 
+                tools=agent_tools, # <-- DYNAMIC TOOLS APPLIED HERE
                 llm=groq_llm,
                 step_callback=agent_step_callback
             )
@@ -140,23 +195,9 @@ def conduct_research(topic: str, file_path: str = None):
                 step_callback=agent_step_callback
             )
 
-            # GUARDRAIL 2: Strict tool rules injected into the prompt
-            if extracted_text:
-                task_desc = f"Analyze the following document text and search the web to research: {topic}. ONLY use the 'search_internet' tool if needed. Do NOT use tags like <function>.\n\n--- DOC START ---\n{extracted_text}\n--- DOC END ---"
-            else:
-                task_desc = f"Search the web to research: {topic}. Extract key facts. ONLY use the 'search_internet' tool. Do NOT use tags like <function>."
-
-            # GUARDRAIL 3: max_inter limits the agent from looping into errors
-            research_task = Task(
-                description=task_desc, 
-                expected_output='A list of findings.', 
-                agent=researcher,
-                max_inter=3 
-            )
-            
-            write_task = Task(description='Write a comprehensive research report based on the findings. Use Markdown formatting including a main title (H1), section headers (H2), and bullet points for key data.', expected_output='A highly structured Markdown report.', agent=writer)
-            edit_task = Task(description='Review and polish the drafted report. Ensure the Markdown formatting is perfect, professional, and highly readable.', expected_output='The final formatted Markdown report..', agent=editor)
-
+            research_task = Task(description=task_desc, expected_output='A list of findings.', agent=researcher, max_inter=3)
+            write_task = Task(description='Write a comprehensive report. Use Markdown.', expected_output='A structured report.', agent=writer)
+            edit_task = Task(description='Review and polish the report.', expected_output='Final report.', agent=editor)
             ai_crew = Crew(
                 agents=[researcher, writer, editor],
                 tasks=[research_task, write_task, edit_task],
