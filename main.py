@@ -5,7 +5,6 @@ import time
 import re
 from queue import Queue
 from threading import Thread
-from contextlib import asynccontextmanager # <-- NEW IMPORT
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +26,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 
-# --- DATABASE SETUP (SQL for History) ---
+# --- DATABASE SETUP ---
 DATABASE_URL = "sqlite:///./research_history.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -44,32 +43,28 @@ Base.metadata.create_all(bind=engine)
 
 os.makedirs("temp_uploads", exist_ok=True)
 
-# Global variable for CrewAI LLM
+# --- GLOBAL VARIABLES FOR LAZY LOADING ---
+models_loaded = False
 groq_llm = None
 
-# --- LIFESPAN EVENT: Opens port FIRST, loads AI SECOND ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global groq_llm
-    print("FastAPI server started! Port is open. Now loading heavy AI models...")
-    
-    # 1. Initialize LlamaIndex Settings (Downloads HuggingFace model in background)
-    Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-    Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
-    
-    # 2. Initialize CrewAI LLM
-    groq_llm = LLM(
-        model="groq/llama-3.3-70b-versatile",
-        temperature=0,
-        max_tokens=4096
-    )
-    
-    print("AI models loaded successfully! Server is ready.")
-    yield
-    print("Shutting down AI models...")
+def initialize_ai_models():
+    """Loads heavy AI models only when the first request is made, preventing server timeouts."""
+    global models_loaded, groq_llm
+    if not models_loaded:
+        print("Downloading and initializing AI models...")
+        Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
+        
+        groq_llm = LLM(
+            model="groq/llama-3.3-70b-versatile",
+            temperature=0,
+            max_tokens=4096
+        )
+        models_loaded = True
+        print("AI models ready!")
 
-# Pass the lifespan to FastAPI
-app = FastAPI(lifespan=lifespan)
+# Instantly boot the app without blocking
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,29 +74,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# GUARDRAIL 1: Explicit instructions on HOW to use the tool
 @tool("search_internet")
 def search_internet(query: str) -> str:
-    """
-    Search the internet for the latest information on a given topic.
-    The input MUST be a single string representing the search query.
-    Do not use any special characters or XML tags.
-    """
+    """Search the internet for the latest information on a given topic."""
     try:
         from langchain_community.tools import DuckDuckGoSearchRun
         search = DuckDuckGoSearchRun()
         return search.run(query)
     except Exception as e:
-        return f"Search failed. Please rely on your internal knowledge or document context. Error: {str(e)}"
+        return f"Search failed. Error: {str(e)}"
 
-# GUARDRAIL 2: The Agent's private database tool
 @tool("search_pdf_database")
 def search_pdf_database(query: str) -> str:
-    """
-    Search the uploaded private PDF document for highly specific information.
-    The input MUST be a single string representing the search query.
-    Use this tool when you need facts, numbers, or context from the user's uploaded file.
-    """
+    """Search the uploaded private PDF document for highly specific information."""
     try:
         client = qdrant_client.QdrantClient(path="./qdrant_db")
         vector_store = QdrantVectorStore(client=client, collection_name="current_research")
@@ -137,8 +122,13 @@ def conduct_research(topic: str, file_path: str = None):
         queue.put(json.dumps({"type": "log", "message": "Agent is processing data..."}))
 
     def run_crew():
-        global groq_llm # Ensure we use the loaded global LLM
+        global groq_llm
         try:
+            # --- LAZY LOAD TRIGGER ---
+            # This happens in a background thread, so Uvicorn is completely safe!
+            queue.put(json.dumps({"type": "log", "message": "Ensuring AI models are loaded (this may take a moment on first run)..."}))
+            initialize_ai_models()
+
             queue.put(json.dumps({"type": "log", "message": f"Initializing workflow for: {topic}"}))
             
             agent_tools = [search_internet] 
@@ -161,14 +151,14 @@ def conduct_research(topic: str, file_path: str = None):
                 queue.put(json.dumps({"type": "log", "message": "Database ready! Equipping Agent with RAG Tool."}))
                 agent_tools.append(search_pdf_database)
                 
-                task_desc = f"Research this topic: {topic}. You have access to a local PDF database containing the user's private document AND the live internet. Use BOTH tools to cross-reference private facts with public news. Do NOT use tags like <function>."
+                task_desc = f"Research this topic: {topic}. You have access to a local PDF database. Use BOTH tools to cross-reference private facts with public news."
             else:
-                task_desc = f"Search the web to research: {topic}. Extract key facts. ONLY use the 'search_internet' tool. Do NOT use tags like <function>."
+                task_desc = f"Search the web to research: {topic}. Extract key facts. ONLY use the 'search_internet' tool."
 
             researcher = Agent(
                 role='Senior Tech Researcher',
                 goal=f'Analyze data and uncover insights about: {topic}',
-                backstory='You seamlessly navigate private databases and public web pages to find undeniable facts.',
+                backstory='You seamlessly navigate private databases and public web pages.',
                 allow_delegation=False,
                 verbose=False,  
                 memory=False,   
@@ -191,7 +181,7 @@ def conduct_research(topic: str, file_path: str = None):
             editor = Agent(
                 role='Chief Content Editor',
                 goal='Ensure the final post is highly engaging and professional.',
-                backstory='You are a meticulous tech editor who polishes content.',
+                backstory='You are a meticulous tech editor.',
                 allow_delegation=False,
                 verbose=False,  
                 memory=False,   
@@ -226,13 +216,10 @@ def conduct_research(topic: str, file_path: str = None):
                     error_str = str(e).lower()
                     if attempt < max_retries and ("rate limit" in error_str or "tokens" in error_str or "429" in error_str):
                         match = re.search(r"try again in (\d+\.?\d*)s", error_str)
-                        if match:
-                            exact_wait = float(match.group(1)) + 1.0
-                        else:
-                            exact_wait = 20.0 
+                        exact_wait = float(match.group(1)) + 1.0 if match else 20.0
                         delay_seconds = round(exact_wait, 2)
                         
-                        queue.put(json.dumps({"type": "log", "message": f"API cooldown hit. Dynamically pausing for {delay_seconds} seconds..."}))
+                        queue.put(json.dumps({"type": "log", "message": f"API cooldown hit. Pausing for {delay_seconds} seconds..."}))
                         time.sleep(delay_seconds)
                     else:
                         raise e 
