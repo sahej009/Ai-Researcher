@@ -1,20 +1,20 @@
-
 import os
 import json
 import shutil
 import time
 import re
 from queue import Queue
-from langchain_groq import ChatGroq
-from crewai import LLM
 from threading import Thread
+from contextlib import asynccontextmanager # <-- NEW IMPORT
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from crewai import Agent, Task, Crew, Process
+
+from langchain_groq import ChatGroq
+from crewai import LLM, Agent, Task, Crew, Process
 from crewai.tools import tool
 
-# --- NEW RAG IMPORTS ---
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, Settings
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -23,11 +23,11 @@ from llama_index.postprocessor.cohere_rerank import CohereRerank
 from llama_index.llms.groq import Groq as LlamaIndexGroq
 import qdrant_client
 
-# --- DATABASE SETUP (SQL for History) ---
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 
+# --- DATABASE SETUP (SQL for History) ---
 DATABASE_URL = "sqlite:///./research_history.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -42,28 +42,41 @@ class ResearchHistory(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- LLAMAINDEX GLOBAL SETTINGS ---
-# We set this up once so the vector database knows how to read and think
-Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
+os.makedirs("temp_uploads", exist_ok=True)
 
-app = FastAPI()
+# Global variable for CrewAI LLM
+groq_llm = None
+
+# --- LIFESPAN EVENT: Opens port FIRST, loads AI SECOND ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global groq_llm
+    print("FastAPI server started! Port is open. Now loading heavy AI models...")
+    
+    # 1. Initialize LlamaIndex Settings (Downloads HuggingFace model in background)
+    Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+    Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
+    
+    # 2. Initialize CrewAI LLM
+    groq_llm = LLM(
+        model="groq/llama-3.3-70b-versatile",
+        temperature=0,
+        max_tokens=4096
+    )
+    
+    print("AI models loaded successfully! Server is ready.")
+    yield
+    print("Shutting down AI models...")
+
+# Pass the lifespan to FastAPI
+app = FastAPI(lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
-groq_key = os.environ.get("GROQ_API_KEY")
-os.makedirs("temp_uploads", exist_ok=True)
-
-# The stable 70B model with strict tool adherence
-groq_llm = LLM(
-    model="groq/llama-3.3-70b-versatile",
-    temperature=0,
-    max_tokens=4096
 )
 
 # GUARDRAIL 1: Explicit instructions on HOW to use the tool
@@ -75,14 +88,13 @@ def search_internet(query: str) -> str:
     Do not use any special characters or XML tags.
     """
     try:
-        # We import it inside the function to avoid startup crashes
         from langchain_community.tools import DuckDuckGoSearchRun
         search = DuckDuckGoSearchRun()
         return search.run(query)
     except Exception as e:
         return f"Search failed. Please rely on your internal knowledge or document context. Error: {str(e)}"
 
-# GUARDRAIL: The Agent's private database tool
+# GUARDRAIL 2: The Agent's private database tool
 @tool("search_pdf_database")
 def search_pdf_database(query: str) -> str:
     """
@@ -91,12 +103,10 @@ def search_pdf_database(query: str) -> str:
     Use this tool when you need facts, numbers, or context from the user's uploaded file.
     """
     try:
-        # Re-connect to the database we build during the upload phase
         client = qdrant_client.QdrantClient(path="./qdrant_db")
         vector_store = QdrantVectorStore(client=client, collection_name="current_research")
         index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
         
-        # Use Cohere to re-rank for pinpoint accuracy
         cohere_rerank = CohereRerank(api_key=os.environ.get("COHERE_API_KEY"), top_n=3)
         query_engine = index.as_query_engine(similarity_top_k=10, node_postprocessors=[cohere_rerank])
         
@@ -127,24 +137,21 @@ def conduct_research(topic: str, file_path: str = None):
         queue.put(json.dumps({"type": "log", "message": "Agent is processing data..."}))
 
     def run_crew():
+        global groq_llm # Ensure we use the loaded global LLM
         try:
             queue.put(json.dumps({"type": "log", "message": f"Initializing workflow for: {topic}"}))
             
-            # --- DYNAMIC VECTOR DATABASE BUILDER ---
-            agent_tools = [search_internet] # By default, only web search is available
+            agent_tools = [search_internet] 
 
             if file_path and os.path.exists(file_path):
                 queue.put(json.dumps({"type": "log", "message": "High-Fidelity PDF detected. Building Vector Database..."}))
                 
-                # Delete old database to prevent mixing up old PDFs with new ones
                 if os.path.exists("./qdrant_db"):
                     shutil.rmtree("./qdrant_db")
                 
-                # Read the PDF cleanly with PyMuPDF
                 pdf_extractor = {".pdf": PyMuPDFReader()}
                 documents = SimpleDirectoryReader(input_files=[file_path], file_extractor=pdf_extractor).load_data()
                 
-                # Build the Vector Database
                 queue.put(json.dumps({"type": "log", "message": "Chunking math & text into Qdrant..."}))
                 client = qdrant_client.QdrantClient(path="./qdrant_db")
                 vector_store = QdrantVectorStore(client=client, collection_name="current_research")
@@ -152,15 +159,12 @@ def conduct_research(topic: str, file_path: str = None):
                 VectorStoreIndex.from_documents(documents, storage_context=storage_context)
                 
                 queue.put(json.dumps({"type": "log", "message": "Database ready! Equipping Agent with RAG Tool."}))
-                
-                # Give the agent the second tool!
                 agent_tools.append(search_pdf_database)
                 
                 task_desc = f"Research this topic: {topic}. You have access to a local PDF database containing the user's private document AND the live internet. Use BOTH tools to cross-reference private facts with public news. Do NOT use tags like <function>."
             else:
                 task_desc = f"Search the web to research: {topic}. Extract key facts. ONLY use the 'search_internet' tool. Do NOT use tags like <function>."
 
-            # --- AGENT DEFINITIONS ---
             researcher = Agent(
                 role='Senior Tech Researcher',
                 goal=f'Analyze data and uncover insights about: {topic}',
@@ -168,7 +172,7 @@ def conduct_research(topic: str, file_path: str = None):
                 allow_delegation=False,
                 verbose=False,  
                 memory=False,   
-                tools=agent_tools, # <-- DYNAMIC TOOLS APPLIED HERE
+                tools=agent_tools,
                 llm=groq_llm,
                 step_callback=agent_step_callback
             )
@@ -198,13 +202,13 @@ def conduct_research(topic: str, file_path: str = None):
             research_task = Task(description=task_desc, expected_output='A list of findings.', agent=researcher, max_inter=3)
             write_task = Task(description='Write a comprehensive report. Use Markdown.', expected_output='A structured report.', agent=writer)
             edit_task = Task(description='Review and polish the report.', expected_output='Final report.', agent=editor)
+            
             ai_crew = Crew(
                 agents=[researcher, writer, editor],
                 tasks=[research_task, write_task, edit_task],
                 process=Process.sequential
             )
 
-            # --- NEW AUTO-RETRY CODE WITH DYNAMIC WAIT TIME ---
             max_retries = 2
             delay_seconds = 20
             final_text = None
@@ -216,7 +220,7 @@ def conduct_research(topic: str, file_path: str = None):
                     
                     result = ai_crew.kickoff()
                     final_text = str(result)
-                    break  # If successful, break out of the retry loop
+                    break 
 
                 except Exception as e:
                     error_str = str(e).lower()
