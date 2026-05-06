@@ -10,18 +10,6 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from langchain_groq import ChatGroq
-from crewai import LLM, Agent, Task, Crew, Process
-from crewai.tools import tool
-
-from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, Settings
-from llama_index.vector_stores.qdrant import QdrantVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.readers.file import PyMuPDFReader
-from llama_index.postprocessor.cohere_rerank import CohereRerank
-from llama_index.llms.groq import Groq as LlamaIndexGroq
-import qdrant_client
-
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
@@ -40,30 +28,11 @@ class ResearchHistory(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
-
 os.makedirs("temp_uploads", exist_ok=True)
 
-# --- GLOBAL VARIABLES FOR LAZY LOADING ---
-models_loaded = False
-groq_llm = None
-
-def initialize_ai_models():
-    """Loads heavy AI models only when the first request is made, preventing server timeouts."""
-    global models_loaded, groq_llm
-    if not models_loaded:
-        print("Downloading and initializing AI models...")
-        Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
-        
-        groq_llm = LLM(
-            model="groq/llama-3.3-70b-versatile",
-            temperature=0,
-            max_tokens=4096
-        )
-        models_loaded = True
-        print("AI models ready!")
-
-# Instantly boot the app without blocking
+# --- INSTANT FASTAPI BOOT ---
+# Because there are no heavy AI imports at the top level, 
+# Uvicorn will reach this line in milliseconds and open the port for Render.
 app = FastAPI()
 
 app.add_middleware(
@@ -74,31 +43,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@tool("search_internet")
-def search_internet(query: str) -> str:
-    """Search the internet for the latest information on a given topic."""
-    try:
-        from langchain_community.tools import DuckDuckGoSearchRun
-        search = DuckDuckGoSearchRun()
-        return search.run(query)
-    except Exception as e:
-        return f"Search failed. Error: {str(e)}"
-
-@tool("search_pdf_database")
-def search_pdf_database(query: str) -> str:
-    """Search the uploaded private PDF document for highly specific information."""
-    try:
-        client = qdrant_client.QdrantClient(path="./qdrant_db")
-        vector_store = QdrantVectorStore(client=client, collection_name="current_research")
-        index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
-        
-        cohere_rerank = CohereRerank(api_key=os.environ.get("COHERE_API_KEY"), top_n=3)
-        query_engine = index.as_query_engine(similarity_top_k=10, node_postprocessors=[cohere_rerank])
-        
-        response = query_engine.query(query)
-        return str(response)
-    except Exception as e:
-        return f"Database search failed. Error: {str(e)}"
+# Global variables to cache models across requests
+models_loaded = False
+groq_llm_instance = None
 
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -118,24 +65,71 @@ def get_history():
 def conduct_research(topic: str, file_path: str = None):
     queue = Queue()
 
-    def agent_step_callback(step_action):
-        queue.put(json.dumps({"type": "log", "message": "Agent is processing data..."}))
-
     def run_crew():
-        global groq_llm
+        global models_loaded, groq_llm_instance
         try:
-            # --- LAZY LOAD TRIGGER ---
-            # This happens in a background thread, so Uvicorn is completely safe!
-            queue.put(json.dumps({"type": "log", "message": "Ensuring AI models are loaded (this may take a moment on first run)..."}))
-            initialize_ai_models()
+            queue.put(json.dumps({"type": "log", "message": "Loading AI Dependencies (This takes ~30 seconds on the first run)..."}))
+            
+            # --- DEEP LAZY IMPORTS ---
+            # These massive libraries are only loaded into memory in the background thread!
+            from crewai import LLM, Agent, Task, Crew, Process
+            from crewai.tools import tool
+            from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, Settings
+            from llama_index.vector_stores.qdrant import QdrantVectorStore
+            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+            from llama_index.readers.file import PyMuPDFReader
+            from llama_index.postprocessor.cohere_rerank import CohereRerank
+            from llama_index.llms.groq import Groq as LlamaIndexGroq
+            import qdrant_client
+
+            # We define tools dynamically so they can access the imported @tool decorator
+            @tool("search_internet")
+            def search_internet(query: str) -> str:
+                """Search the internet for the latest information on a given topic."""
+                try:
+                    from langchain_community.tools import DuckDuckGoSearchRun
+                    search = DuckDuckGoSearchRun()
+                    return search.run(query)
+                except Exception as e:
+                    return f"Search failed. Error: {str(e)}"
+
+            @tool("search_pdf_database")
+            def search_pdf_database(query: str) -> str:
+                """Search the uploaded private PDF document for highly specific information."""
+                try:
+                    client = qdrant_client.QdrantClient(path="./qdrant_db")
+                    vector_store = QdrantVectorStore(client=client, collection_name="current_research")
+                    index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
+                    
+                    cohere_rerank = CohereRerank(api_key=os.environ.get("COHERE_API_KEY"), top_n=3)
+                    query_engine = index.as_query_engine(similarity_top_k=10, node_postprocessors=[cohere_rerank])
+                    
+                    response = query_engine.query(query)
+                    return str(response)
+                except Exception as e:
+                    return f"Database search failed. Error: {str(e)}"
+
+            # Load heavy models only once
+            if not models_loaded:
+                queue.put(json.dumps({"type": "log", "message": "Caching HuggingFace Embeddings..."}))
+                Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
+                
+                groq_llm_instance = LLM(
+                    model="groq/llama-3.3-70b-versatile",
+                    temperature=0,
+                    max_tokens=4096
+                )
+                models_loaded = True
+
+            def agent_step_callback(step_action):
+                queue.put(json.dumps({"type": "log", "message": "Agent is processing data..."}))
 
             queue.put(json.dumps({"type": "log", "message": f"Initializing workflow for: {topic}"}))
-            
             agent_tools = [search_internet] 
 
             if file_path and os.path.exists(file_path):
                 queue.put(json.dumps({"type": "log", "message": "High-Fidelity PDF detected. Building Vector Database..."}))
-                
                 if os.path.exists("./qdrant_db"):
                     shutil.rmtree("./qdrant_db")
                 
@@ -150,7 +144,6 @@ def conduct_research(topic: str, file_path: str = None):
                 
                 queue.put(json.dumps({"type": "log", "message": "Database ready! Equipping Agent with RAG Tool."}))
                 agent_tools.append(search_pdf_database)
-                
                 task_desc = f"Research this topic: {topic}. You have access to a local PDF database. Use BOTH tools to cross-reference private facts with public news."
             else:
                 task_desc = f"Search the web to research: {topic}. Extract key facts. ONLY use the 'search_internet' tool."
@@ -163,7 +156,7 @@ def conduct_research(topic: str, file_path: str = None):
                 verbose=False,  
                 memory=False,   
                 tools=agent_tools,
-                llm=groq_llm,
+                llm=groq_llm_instance,
                 step_callback=agent_step_callback
             )
 
@@ -174,7 +167,7 @@ def conduct_research(topic: str, file_path: str = None):
                 allow_delegation=False,
                 verbose=False,  
                 memory=False,   
-                llm=groq_llm,
+                llm=groq_llm_instance,
                 step_callback=agent_step_callback
             )
 
@@ -185,7 +178,7 @@ def conduct_research(topic: str, file_path: str = None):
                 allow_delegation=False,
                 verbose=False,  
                 memory=False,   
-                llm=groq_llm,
+                llm=groq_llm_instance,
                 step_callback=agent_step_callback
             )
 
