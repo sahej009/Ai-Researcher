@@ -14,3 +14,4 @@ llama-index-llms-groq
 llama-index-embeddings-cohere
 qdrant-client
 PyMuPDF
+litellm
