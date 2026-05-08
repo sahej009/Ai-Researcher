@@ -76,7 +76,7 @@ def conduct_research(topic: str, file_path: str = None):
             from crewai.tools import tool
             from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, Settings
             from llama_index.vector_stores.qdrant import QdrantVectorStore
-            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+            from llama_index.embeddings.cohere import CohereEmbedding
             from llama_index.readers.file import PyMuPDFReader
             from llama_index.postprocessor.cohere_rerank import CohereRerank
             from llama_index.llms.groq import Groq as LlamaIndexGroq
@@ -112,7 +112,11 @@ def conduct_research(topic: str, file_path: str = None):
             # Load heavy models only once
             if not models_loaded:
                 queue.put(json.dumps({"type": "log", "message": "Caching HuggingFace Embeddings..."}))
-                Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                Settings.embed_model = CohereEmbedding(
+                    api_key=os.environ.get("COHERE_API_KEY"),
+                    model_name="embed-english-v3.0",
+                    input_type="search_document"
+                )
                 Settings.llm = LlamaIndexGroq(model="llama-3.3-70b-versatile", api_key=os.environ.get("GROQ_API_KEY"))
                 
                 groq_llm_instance = LLM(
