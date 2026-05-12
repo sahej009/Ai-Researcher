@@ -89,7 +89,8 @@ def conduct_research(topic: str, file_path: str = None):
                 try:
                     from langchain_community.tools import DuckDuckGoSearchRun
                     search = DuckDuckGoSearchRun()
-                    return search.run(query)
+                    # UPDATED: Truncate tool output to prevent token bloat
+                    return search.run(query)[:2000]
                 except Exception as e:
                     return f"Search failed. Error: {str(e)}"
 
@@ -105,7 +106,8 @@ def conduct_research(topic: str, file_path: str = None):
                     query_engine = index.as_query_engine(similarity_top_k=10, node_postprocessors=[cohere_rerank])
                     
                     response = query_engine.query(query)
-                    return str(response)
+                    # UPDATED: Truncate tool output to prevent token bloat
+                    return str(response)[:2000]
                 except Exception as e:
                     return f"Database search failed. Error: {str(e)}"
 
@@ -161,6 +163,7 @@ def conduct_research(topic: str, file_path: str = None):
                 memory=False,   
                 tools=agent_tools,
                 llm=groq_llm_instance,
+                max_iter=3, # UPDATED: Added iteration cap here to prevent infinite loops
                 step_callback=agent_step_callback
             )
 
@@ -186,7 +189,8 @@ def conduct_research(topic: str, file_path: str = None):
                 step_callback=agent_step_callback
             )
 
-            research_task = Task(description=task_desc, expected_output='A list of findings.', agent=researcher, max_inter=3)
+            # UPDATED: Removed the typo 'max_inter=3' from this task
+            research_task = Task(description=task_desc, expected_output='A list of findings.', agent=researcher)
             write_task = Task(description='Write a comprehensive report. Use Markdown.', expected_output='A structured report.', agent=writer)
             edit_task = Task(description='Review and polish the report.', expected_output='Final report.', agent=editor)
             
