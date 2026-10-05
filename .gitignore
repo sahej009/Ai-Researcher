@@ -8,3 +8,8 @@ venv/
 *.db
 temp_uploads/
 .DS_Store
+__pycache__/
+*.pyc
+research_history.db
+qdrant_db/
+temp_uploads/
